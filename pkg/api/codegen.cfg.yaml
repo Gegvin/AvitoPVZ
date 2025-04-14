@@ -1,0 +1,6 @@
+package: api
+generate:
+  models: true # Генерировать модели (замена types)
+output: dto.gen.go # Относительный путь для вывода
+output-options:
+  skip-prune: true

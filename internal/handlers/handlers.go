@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"github.com/dgrijalva/jwt-go"
+	"errors"
+	"fmt"
+	"github.com/google/uuid"
+	"github.com/oapi-codegen/runtime/types"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +18,9 @@ import (
 	"AvitoPVZ/internal/models"
 	"AvitoPVZ/internal/repository"
 	"AvitoPVZ/internal/utils"
-	"github.com/google/uuid"
+	"AvitoPVZ/pkg/api"
+
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/mux"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -28,33 +34,44 @@ type contextKey string
 // Использование собственного типа гарантирует уникальность ключа.
 const UserKey contextKey = "user"
 
-// Handler хранит зависимости для HTTP-обработчиков.
+// Handler теперь включает ProductTypeRepository
 type Handler struct {
-	db            *sql.DB
-	cfg           *config.Config
-	userRepo      repository.UserRepository
-	pvzRepo       repository.PVZRepository
-	receptionRepo repository.ReceptionRepository
-	productRepo   repository.ProductRepository
+	db              *sql.DB
+	cfg             *config.Config
+	logger          *slog.Logger
+	userRepo        repository.UserRepository
+	pvzRepo         repository.PVZRepository
+	receptionRepo   repository.ReceptionRepository
+	productRepo     repository.ProductRepository
+	productTypeRepo repository.ProductTypeRepository
 }
 
-// NewHandler создаёт новый объект Handler.
-func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
+// NewHandler инициализирует все репозитории
+func NewHandler(db *sql.DB, cfg *config.Config, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Handler{
-		db:            db,
-		cfg:           cfg,
-		userRepo:      repository.NewUserRepository(db),
-		pvzRepo:       repository.NewPVZRepository(db),
-		receptionRepo: repository.NewReceptionRepository(db),
-		productRepo:   repository.NewProductRepository(db),
+		db:              db,
+		cfg:             cfg,
+		logger:          logger.With(slog.String("component", "http_handler")),
+		userRepo:        repository.NewUserRepository(db),
+		pvzRepo:         repository.NewPVZRepository(db),
+		receptionRepo:   repository.NewReceptionRepository(db),
+		productRepo:     repository.NewProductRepository(db),
+		productTypeRepo: repository.NewProductTypeRepository(db),
 	}
 }
 
 // respondJSON отправляет ответ в формате JSON.
+// Теперь использует api.Error для стандартных ошибок.
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {
 	response, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(w, "JSON marshal error", http.StatusInternalServerError)
+		slog.Error("JSON marshal error in respondJSON", slog.Any("error", err))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(api.Error{Message: "Internal Server Error"}) // Используем api.Error
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -62,329 +79,613 @@ func respondJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Write(response)
 }
 
+// respondError - хелпер для отправки стандартизированных ошибок api.Error
+func respondError(w http.ResponseWriter, logger *slog.Logger, status int, message string, err error) {
+	logLevel := slog.LevelError
+	if status < 500 && status >= 400 {
+		logLevel = slog.LevelWarn
+	}
+	// Log underlying error if present, otherwise log the message
+	errToLog := err
+	if errToLog == nil && status >= 500 { // Log message as error for 5xx if no underlying error
+		errToLog = errors.New(message)
+	}
+	logger.Log(context.Background(), logLevel, message, slog.Any("error", errToLog), slog.Int("status", status))
+	respondJSON(w, status, api.Error{Message: message}) // Используем api.Error
+}
+
 // AuthMiddleware – HTTP middleware для проверки заголовка Authorization.
-// Он извлекает токен в формате "Bearer <token>", проверяет его с помощью utils.ParseToken,
-// и добавляет полученные данные (claims) в контекст запроса под ключом UserKey.
+// Использует api.Error для сообщений об ошибках.
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqLogger := h.logger.With(slog.String("middleware", "AuthMiddleware"))
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			http.Error(w, "missing auth header", http.StatusUnauthorized)
+			reqLogger.Warn("Missing auth header")
+			respondJSON(w, http.StatusUnauthorized, api.Error{Message: "missing auth header"}) // DTO
 			return
 		}
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			http.Error(w, "invalid auth header", http.StatusUnauthorized)
+			reqLogger.Warn("Invalid auth header format")
+			respondJSON(w, http.StatusUnauthorized, api.Error{Message: "invalid auth header"}) // DTO
 			return
 		}
 		tokenStr := parts[1]
 		claims, err := utils.ParseToken(tokenStr, h.cfg.JWTSecret)
 		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			reqLogger.Warn("Invalid token", slog.Any("error", err))
+			respondJSON(w, http.StatusUnauthorized, api.Error{Message: "invalid token"}) // DTO
 			return
 		}
-		// Добавляем данные о пользователе (claims) в контекст запроса.
+
+		userID, _ := claims["user_id"].(string)
+		role, _ := claims["role"].(string)
+		reqLogger.Debug("Token validated", slog.String("user_id", userID), slog.String("role", role))
+
 		ctx := context.WithValue(r.Context(), UserKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// DummyLogin – выдаёт тестовый токен для указанной роли (employee или moderator).
+// DummyLogin – выдаёт тестовый токен для указанной роли.
+// Использует api.TokenResponse для ответа.
 func (h *Handler) DummyLogin(w http.ResponseWriter, r *http.Request) {
+	logger := h.logger.With(slog.String("handler", "DummyLogin"))
 	var req struct {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
+	logger.Debug("Request received", slog.String("role", req.Role))
+
 	if req.Role != "employee" && req.Role != "moderator" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid role"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid role specified", nil)
 		return
 	}
-	token, err := utils.GenerateToken(uuid.New().String(), req.Role, h.cfg.JWTSecret)
+	tempUserID := uuid.New().String()
+	token, err := utils.GenerateToken(tempUserID, req.Role, h.cfg.JWTSecret)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Token generation error"})
+		respondError(w, logger, http.StatusInternalServerError, "Token generation error", err)
 		return
 	}
-	respondJSON(w, http.StatusOK, token)
+	logger.Info("Dummy token generated", slog.String("role", req.Role), slog.String("user_id", tempUserID))
+	respondJSON(w, http.StatusOK, api.TokenResponse{Token: &token})
 }
 
-// Register – регистрация нового пользователя.
+// Register – ИСПОЛЬЗУЕТ DTO, без изменений.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
-	}
+	logger := h.logger.With(slog.String("handler", "Register"))
+	var req api.RegisterRequest
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
-	if req.Role != "employee" && req.Role != "moderator" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid role"})
+	// Преобразуем типы DTO к string для использования внутри
+	emailStr := string(req.Email)
+	roleStr := string(req.Role)
+	logger.Debug("Request body decoded", slog.String("email", emailStr), slog.String("role", roleStr))
+
+	// Валидация роли
+	if roleStr != "employee" && roleStr != "moderator" {
+		respondError(w, logger, http.StatusBadRequest, "Invalid role specified", nil)
 		return
 	}
+
 	hashedPass, err := utils.HashPassword(req.Password)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Password hashing error"})
+		respondError(w, logger, http.StatusInternalServerError, "Password hashing error", err)
 		return
 	}
+	// Создаем внутреннюю модель
+	userID := uuid.New() // Генерируем UUID сразу
 	user := &models.User{
-		ID:       uuid.New().String(),
-		Email:    req.Email,
+		ID:       userID.String(), // Сохраняем как строку в модели
+		Email:    emailStr,
 		Password: hashedPass,
-		Role:     req.Role,
+		Role:     roleStr,
 	}
 	err = h.userRepo.CreateUser(user)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "User creation failed"})
+		// Проверяем на ошибку дубликата email более надежно
+		if strings.Contains(err.Error(), "duplicate key value violates unique constraint") && strings.Contains(err.Error(), "users_email_key") {
+			respondError(w, logger, http.StatusConflict, "Email already exists", err)
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "User creation failed", err)
+		}
 		return
 	}
-	respondJSON(w, http.StatusCreated, user)
+	logger.Info("User registered successfully", slog.String("user_id", user.ID), slog.String("email", user.Email))
+
+	// Создаем DTO для ответа.
+	emailDto := types.Email(user.Email)        // Преобразуем string -> types.Email
+	roleDto := api.UserResponseRole(user.Role) // Преобразуем string -> api.UserResponseRole
+	idForDto := userID                         // Используем существующий uuid.UUID
+
+	responseUser := api.UserResponse{
+		Id:    &idForDto, // <<< Адрес от переменной типа uuid.UUID (должен быть совместим с *types.UUID)
+		Email: &emailDto, // <<< Адрес от переменной типа types.Email
+		Role:  &roleDto,  // <<< Адрес от переменной типа api.UserResponseRole
+	}
+
+	respondJSON(w, http.StatusCreated, responseUser)
 }
 
-// Login – авторизация пользователя и выдача JWT-токена.
+// Login – ИСПОЛЬЗУЕТ DTO, без изменений.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	logger := h.logger.With(slog.String("handler", "Login"))
+	var req api.LoginRequest
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
-	user, err := h.userRepo.GetUserByEmail(req.Email)
+	// Преобразуем к string для использования внутри
+	emailStr := string(req.Email) // <<< Преобразуем DTO Email к string
+	logger.Debug("Login attempt", slog.String("email", emailStr))
+
+	// Используем внутреннюю модель
+	user, err := h.userRepo.GetUserByEmail(emailStr) // <<< Передаем string
 	if err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"message": "User not found"})
+		errMsg := "User not found or invalid credentials"
+		if errors.Is(err, sql.ErrNoRows) {
+			// Логируем как Warn, так как это ожидаемое поведение для неверного ввода
+			logger.Warn(errMsg, slog.String("email", emailStr))
+			respondError(w, logger, http.StatusUnauthorized, errMsg, nil) // Не передаем sql.ErrNoRows клиенту
+		} else {
+			// Логируем как Error для неожиданных ошибок БД
+			respondError(w, logger, http.StatusInternalServerError, "Database error during login", err)
+		}
 		return
 	}
+
 	if !utils.CheckPasswordHash(req.Password, user.Password) {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"message": "Invalid credentials"})
+		logger.Warn("Invalid password attempt", slog.String("email", user.Email), slog.String("user_id", user.ID))
+		respondError(w, logger, http.StatusUnauthorized, "User not found or invalid credentials", nil)
 		return
 	}
+
 	token, err := utils.GenerateToken(user.ID, user.Role, h.cfg.JWTSecret)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Token generation error"})
+		respondError(w, logger, http.StatusInternalServerError, "Token generation error", err)
 		return
 	}
-	respondJSON(w, http.StatusOK, token)
+	logger.Info("User logged in successfully", slog.String("user_id", user.ID), slog.String("email", user.Email))
+
+	// Создаем DTO для ответа
+	respondJSON(w, http.StatusOK, api.TokenResponse{Token: &token})
 }
 
 // CreatePVZ – создание нового ПВЗ (только для модераторов).
+// Проверяет город по базе данных.
 func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
-	// Приводим данные из context к jwt.MapClaims
-	claims, ok := r.Context().Value(UserKey).(jwt.MapClaims)
-	if !ok {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: no claims found"})
+	logger := h.logger.With(slog.String("handler", "CreatePVZ"))
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
+		return
+	}
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	if role != "moderator" {
+		respondError(w, logger, http.StatusForbidden, "Access denied: insufficient privileges", nil)
 		return
 	}
 
-	// Извлекаем роль и проверяем, что она "moderator"
-	role, roleOk := claims["role"].(string)
-	if !roleOk || role != "moderator" {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: insufficient privileges"})
-		return
+	// Ожидаем JSON с полем "city", содержащим НАЗВАНИЕ города
+	var req struct {
+		City string `json:"city"`
 	}
-
-	var req models.PVZ
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body format", err)
 		return
 	}
-	if req.City != "Москва" && req.City != "Санкт-Петербург" && req.City != "Казань" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "City not allowed"})
+	logger.Debug("Request body decoded", slog.String("city_name", req.City))
+
+	if req.City == "" {
+		respondError(w, logger, http.StatusBadRequest, "City name cannot be empty", nil)
 		return
 	}
-	req.ID = uuid.New().String()
-	req.RegistrationDate = time.Now()
-	err := h.pvzRepo.CreatePVZ(&req)
+
+	// --- Проверка и получение ID города из репозитория ---
+	cityID, err := h.pvzRepo.GetCityIDByName(req.City)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Failed to create PVZ"})
+		if errors.Is(err, sql.ErrNoRows) {
+			logger.Warn("Attempt to create PVZ in disallowed city", slog.String("city_name", req.City))
+			respondError(w, logger, http.StatusBadRequest, "City not allowed or does not exist", nil) // Не передаем ошибку БД клиенту
+		} else {
+			// Логируем как Error для других ошибок БД
+			respondError(w, logger, http.StatusInternalServerError, "Failed to validate city", err)
+		}
 		return
 	}
+	logger.Debug("City validated", slog.String("city_name", req.City), slog.Int("city_id", cityID))
+	// --- Конец проверки города ---
+
+	// Создаем модель PVZ с CityID
+	pvzModel := models.PVZ{
+		ID:               uuid.New().String(),
+		RegistrationDate: time.Now(),
+		CityID:           cityID,
+		// CityName будет заполнено при чтении, но для ответа можем заполнить сразу
+		CityName: req.City,
+	}
+
+	// Создаем ПВЗ в репозитории
+	err = h.pvzRepo.CreatePVZ(&pvzModel)
+	if err != nil {
+		// TODO: Проверить на специфические ошибки БД (например, дубликат ID), если нужно
+		respondError(w, logger, http.StatusInternalServerError, "Failed to create PVZ", err)
+		return
+	}
+
 	metrics.IncPVZCreated()
-	respondJSON(w, http.StatusCreated, req)
+	logger.Info("PVZ created successfully", slog.String("pvz_id", pvzModel.ID), slog.String("city_name", pvzModel.CityName), slog.Int("city_id", pvzModel.CityID))
+
+	// Отправляем ответ. Модель pvzModel уже содержит CityName.
+	respondJSON(w, http.StatusCreated, pvzModel)
 }
 
-// GetPVZList – получение списка ПВЗ с фильтрацией и пагинацией.
+// GetPVZList – *** ОБНОВЛЕНО: проверка ролей, пагинация, фильтр по дате ***
 func (h *Handler) GetPVZList(w http.ResponseWriter, r *http.Request) {
-	pvzs, err := h.pvzRepo.GetPVZList(r.URL.Query())
-	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Failed to get PVZ list"})
+	logger := h.logger.With(slog.String("handler", "GetPVZList"))
+
+	// --- 1. Проверка роли (employee или moderator) ---
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
 		return
 	}
+	if role != "employee" && role != "moderator" {
+		respondError(w, logger, http.StatusForbidden, "Access denied", nil)
+		return
+	}
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	// --- Конец проверки роли ---
+
+	// --- 2. Парсинг параметров пагинации и фильтрации ---
+	params := r.URL.Query() // Получаем все query параметры
+	logger.Info("Fetching PVZ list", slog.String("query", r.URL.RawQuery))
+
+	// // Делегируем парсинг параметров репозиторию, передавая url.Values
+	// // Альтернативно, можно парсить здесь:
+	// limitStr := params.Get("limit")
+	// offsetStr := params.Get("offset")
+	// dateStr := params.Get("receptionDate") // Ожидаемый формат YYYY-MM-DD
+
+	// // Значения по умолчанию
+	// limit := 10 // Например, 10 элементов на страницу
+	// offset := 0
+	// var receptionDate *time.Time
+
+	// // Парсинг limit
+	// if limitStr != "" {
+	// 	l, err := strconv.Atoi(limitStr)
+	// 	if err != nil || l <= 0 {
+	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'limit' parameter", err)
+	// 		return
+	// 	}
+	// 	limit = l
+	// }
+
+	// // Парсинг offset
+	// if offsetStr != "" {
+	// 	o, err := strconv.Atoi(offsetStr)
+	// 	if err != nil || o < 0 {
+	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'offset' parameter", err)
+	// 		return
+	// 	}
+	// 	offset = o
+	// }
+
+	// // Парсинг даты
+	// if dateStr != "" {
+	// 	t, err := time.Parse("2006-01-02", dateStr) // Используем стандартный формат даты
+	// 	if err != nil {
+	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'receptionDate' parameter format (use YYYY-MM-DD)", err)
+	// 		return
+	// 	}
+	// 	receptionDate = &t
+	// }
+	// // Создаем структуру параметров для репозитория (если бы парсили здесь)
+	// repoParams := repository.GetPVZListParams{
+	// 	Limit:         limit,
+	// 	Offset:        offset,
+	// 	ReceptionDate: receptionDate,
+	// }
+	// --- Конец парсинга ---
+
+	// --- 3. Вызов репозитория с параметрами ---
+	// Передаем все параметры запроса в репозиторий, который сам их разберет
+	pvzs, err := h.pvzRepo.GetPVZList(params)
+	if err != nil {
+		// Обрабатываем возможные ошибки парсинга из репозитория как Bad Request
+		if strings.Contains(err.Error(), "invalid parameter") { // Пример проверки текста ошибки
+			respondError(w, logger, http.StatusBadRequest, err.Error(), err)
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "Failed to get PVZ list", err)
+		}
+		return
+	}
+
+	logger.Info("PVZ list retrieved successfully", slog.Int("count", len(pvzs)))
+	// Отправляем список моделей
+	// TODO: Рассмотреть добавление метаданных пагинации (total count и т.д.)
 	respondJSON(w, http.StatusOK, pvzs)
 }
 
 // CreateReception – создание новой приёмки товаров (только для сотрудников ПВЗ).
 func (h *Handler) CreateReception(w http.ResponseWriter, r *http.Request) {
-	claims, ok := r.Context().Value(UserKey).(jwt.MapClaims)
-	if !ok {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: no claims found"})
+	logger := h.logger.With(slog.String("handler", "CreateReception"))
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
 		return
 	}
-	role, roleOk := claims["role"].(string)
-	if !roleOk || role != "employee" {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: employee required"})
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	if role != "employee" {
+		respondError(w, logger, http.StatusForbidden, "Access denied: employee required", nil)
 		return
 	}
-	// Далее стандартная логика создания приёмки
 	var req struct {
 		PVZID string `json:"pvzId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
-	// Проверка, что открытой приёмки нет
+	logger.Debug("Request body decoded", slog.String("pvz_id", req.PVZID))
 	exists, err := h.receptionRepo.OpenReceptionExists(req.PVZID)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Error checking reception"})
+		respondError(w, logger, http.StatusInternalServerError, "Error checking reception status", err)
 		return
 	}
 	if exists {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Open reception already exists"})
+		respondError(w, logger, http.StatusBadRequest, "Open reception already exists for this PVZ", nil)
 		return
 	}
-	reception := &models.Reception{
-		ID:       uuid.New().String(),
-		DateTime: time.Now(),
-		PVZID:    req.PVZID,
-		Status:   "in_progress",
-	}
+	reception := &models.Reception{ID: uuid.New().String(), DateTime: time.Now(), PVZID: req.PVZID, Status: "in_progress"}
 	if err := h.receptionRepo.CreateReception(reception); err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Failed to create reception"})
+		respondError(w, logger, http.StatusInternalServerError, "Failed to create reception", err)
 		return
 	}
 	metrics.IncReceptionCreated()
+	logger.Info("Reception created successfully", slog.String("reception_id", reception.ID), slog.String("pvz_id", reception.PVZID))
 	respondJSON(w, http.StatusCreated, reception)
 }
 
 // AddProduct – добавление товара в текущую приёмку (только для сотрудников ПВЗ).
+// --- ОБНОВЛЕНА ЛОГИКА ВАЛИДАЦИИ ТИПА ---
 func (h *Handler) AddProduct(w http.ResponseWriter, r *http.Request) {
-	claims, ok := r.Context().Value(UserKey).(jwt.MapClaims)
-	if !ok {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: no claims found"})
+	logger := h.logger.With(slog.String("handler", "AddProduct"))
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
 		return
 	}
-	role, roleOk := claims["role"].(string)
-	if !roleOk || role != "employee" {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: employee required"})
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	if role != "employee" {
+		respondError(w, logger, http.StatusForbidden, "Access denied: employee required", nil)
 		return
 	}
 
+	// Структура запроса ожидает имя типа товара
 	var req struct {
+		// Type теперь означает имя типа, а не сам тип в БД
 		Type  string `json:"type"`
 		PVZID string `json:"pvzId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid request"})
+		respondError(w, logger, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
-	if req.Type != "электроника" && req.Type != "одежда" && req.Type != "обувь" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Invalid product type"})
+	logger.Debug("Request body decoded", slog.String("pvz_id", req.PVZID), slog.String("product_type_name", req.Type))
+
+	// --- Новая логика: Валидация типа товара через БД ---
+	if req.Type == "" {
+		respondError(w, logger, http.StatusBadRequest, "Product type name cannot be empty", nil)
 		return
 	}
+	typeID, err := h.productTypeRepo.GetProductTypeIDByName(req.Type) // <<< Используем новый репозиторий
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			logger.Warn("Invalid product type received", slog.String("type_name", req.Type))
+			// Используем более общее сообщение об ошибке для пользователя
+			respondError(w, logger, http.StatusBadRequest, "Invalid or unsupported product type", nil)
+		} else {
+			// Логируем как ошибку сервера для других проблем с БД
+			respondError(w, logger, http.StatusInternalServerError, "Failed to validate product type", err)
+		}
+		return
+	}
+	logger.Debug("Product type validated", slog.String("type_name", req.Type), slog.Int("type_id", typeID))
+	// --- Конец новой логики ---
+
+	// Получаем открытую приемку (логика не изменилась)
 	reception, err := h.receptionRepo.GetOpenReception(req.PVZID)
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "No open reception found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			respondError(w, logger, http.StatusBadRequest, "No open reception found for this PVZ", nil)
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "Error checking reception status", err)
+		}
 		return
 	}
+	logger = logger.With(slog.String("reception_id", reception.ID))
+
+	// Создаем модель продукта с TypeID
 	product := &models.Product{
 		ID:          uuid.New().String(),
 		DateTime:    time.Now(),
-		Type:        req.Type,
 		ReceptionID: reception.ID,
+		TypeID:      typeID, // <<< Используем найденный ID типа
 	}
+
+	// Добавляем продукт в репозиторий (репозиторий ожидает TypeID)
 	err = h.productRepo.AddProduct(product)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Failed to add product"})
+		respondError(w, logger, http.StatusInternalServerError, "Failed to add product", err)
 		return
 	}
 	metrics.IncProductAdded()
+	// В лог можно добавить и имя типа для понятности
+	logger.Info("Product added successfully", slog.String("product_id", product.ID), slog.String("product_type_name", req.Type), slog.Int("type_id", product.TypeID))
+
+	// --- Ответ API ---
+	// Возвращаем созданный объект Product.
+	// Модель сейчас не содержит TypeName, заполняем его для ответа
+	product.TypeName = req.Type // <<< Заполняем имя типа для ответа
 	respondJSON(w, http.StatusCreated, product)
 }
 
-// DeleteLastProduct – удаление последнего добавленного товара (LIFO) из текущей приёмки (только для сотрудников ПВЗ).
+// DeleteLastProduct – удаление последнего добавленного товара (LIFO) из текущей приёмки.
 func (h *Handler) DeleteLastProduct(w http.ResponseWriter, r *http.Request) {
-	claims, ok := r.Context().Value(UserKey).(jwt.MapClaims)
-	if !ok {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: no claims found"})
+	logger := h.logger.With(slog.String("handler", "DeleteLastProduct"))
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
 		return
 	}
-	role, roleOk := claims["role"].(string)
-	if !roleOk || role != "employee" {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: employee required"})
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	if role != "employee" {
+		respondError(w, logger, http.StatusForbidden, "Access denied: employee required", nil)
 		return
 	}
-
-	pvzId := mux.Vars(r)["pvzId"]
+	vars := mux.Vars(r)
+	pvzId, pvzOk := vars["pvzId"]
+	if !pvzOk {
+		respondError(w, logger, http.StatusBadRequest, "Bad request: Missing pvzId in path", nil)
+		return
+	}
+	logger = logger.With(slog.String("pvz_id", pvzId))
+	logger.Info("Attempting to delete last product")
 	err := h.productRepo.DeleteLastProduct(pvzId)
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		// Используем кастомную ошибку из репозитория
+		if err.Error() == "no product to delete" { // Сравниваем текст ошибки (или лучше определить типизированную ошибку)
+			respondError(w, logger, http.StatusBadRequest, err.Error(), nil) // Передаем сообщение как есть
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "Failed to delete product", err)
+		}
 		return
 	}
+	logger.Info("Last product deleted successfully")
 	respondJSON(w, http.StatusOK, map[string]string{"message": "Product deleted"})
 }
 
-// CloseLastReception – закрытие последней открытой приёмки в рамках ПВЗ (только для сотрудников ПВЗ).
+// CloseLastReception – закрытие последней открытой приёмки в рамках ПВЗ.
 func (h *Handler) CloseLastReception(w http.ResponseWriter, r *http.Request) {
-	claims, ok := r.Context().Value(UserKey).(jwt.MapClaims)
-	if !ok {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: no claims found"})
+	logger := h.logger.With(slog.String("handler", "CloseLastReception"))
+	claims, role, userID := getUserClaimsFromContext(r, logger)
+	if claims == nil {
+		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
 		return
 	}
-	role, roleOk := claims["role"].(string)
-	if !roleOk || role != "employee" {
-		respondJSON(w, http.StatusForbidden, map[string]string{"message": "Access denied: employee required"})
+	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
+	if role != "employee" {
+		respondError(w, logger, http.StatusForbidden, "Access denied: employee required", nil)
 		return
 	}
-
-	pvzId := mux.Vars(r)["pvzId"]
+	vars := mux.Vars(r)
+	pvzId, pvzOk := vars["pvzId"]
+	if !pvzOk {
+		respondError(w, logger, http.StatusBadRequest, "Bad request: Missing pvzId in path", nil)
+		return
+	}
+	logger = logger.With(slog.String("pvz_id", pvzId))
+	logger.Info("Attempting to close last reception")
 	reception, err := h.receptionRepo.GetOpenReception(pvzId)
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "No open reception found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			respondError(w, logger, http.StatusBadRequest, "No open reception found for this PVZ", nil)
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "Error checking reception status", err)
+		}
 		return
 	}
+	logger = logger.With(slog.String("reception_id", reception.ID))
 	if reception.Status != "in_progress" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"message": "Reception already closed"})
+		respondError(w, logger, http.StatusBadRequest, "Reception is not in progress", nil)
 		return
 	}
-	reception.Status = "close"
 	err = h.receptionRepo.CloseReception(reception.ID)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]string{"message": "Failed to close reception"})
+		// Проверяем кастомную ошибку репозитория
+		if err.Error() == "no reception updated" {
+			// Это странная ситуация, но обработаем как ошибку клиента
+			respondError(w, logger, http.StatusBadRequest, "Reception not found or already closed", nil)
+		} else {
+			respondError(w, logger, http.StatusInternalServerError, "Failed to close reception", err)
+		}
 		return
 	}
+	logger.Info("Reception closed successfully")
+	reception.Status = "close" // Обновляем статус в объекте перед отправкой
 	respondJSON(w, http.StatusOK, reception)
 }
 
-// Реализация gRPC-сервиса PVZService.
+// --- Реализация gRPC-сервиса PVZService ---
+// Используем CityName из модели PVZ.
 type PVZService struct {
-	db *sql.DB
+	pvzRepo repository.PVZRepository // Используем тот же репозиторий
+	logger  *slog.Logger
 	pb.UnimplementedPVZServiceServer
 }
 
-// NewPVZService создаёт новый сервис для gRPC.
-func NewPVZService(db *sql.DB) *PVZService {
-	return &PVZService{db: db}
+func NewPVZService(repo repository.PVZRepository, logger *slog.Logger) *PVZService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &PVZService{pvzRepo: repo, logger: logger.With(slog.String("component", "grpc_service"), slog.String("service", "PVZService"))}
 }
 
-// GetPVZList возвращает список ПВЗ (упрощённо – берём все записи).
 func (s *PVZService) GetPVZList(ctx context.Context, req *pb.GetPVZListRequest) (*pb.GetPVZListResponse, error) {
-	repo := repository.NewPVZRepository(s.db)
-	pvzs, err := repo.GetAllPVZ()
+	s.logger.Info("Handling GetPVZList gRPC request")
+	// !!! ВАЖНО: gRPC метод GetAllPVZ пока не поддерживает фильтры/пагинацию !!!
+	// Используем GetAllPVZ, который внутри вызывает GetPVZList(nil)
+	pvzs, err := s.pvzRepo.GetAllPVZ()
 	if err != nil {
-		return nil, err
+		s.logger.Error("Failed to get all PVZ from repository for gRPC", slog.Any("error", err))
+		return nil, err // Возвращаем исходную ошибку для простоты
 	}
+
 	var protoPVZs []*pb.PVZ
 	for _, p := range pvzs {
 		protoPVZs = append(protoPVZs, &pb.PVZ{
 			Id:               p.ID,
 			RegistrationDate: timestamppb.New(p.RegistrationDate),
-			City:             p.City,
+			City:             p.CityName, // Используем CityName из модели
 		})
 	}
+	s.logger.Info("Successfully retrieved PVZ list via gRPC", slog.Int("count", len(protoPVZs)))
 	return &pb.GetPVZListResponse{Pvzs: protoPVZs}, nil
+}
+
+// Вспомогательная функция для извлечения claims из контекста (без изменений)
+func getUserClaimsFromContext(r *http.Request, logger *slog.Logger) (claims jwt.MapClaims, role string, userID string) {
+	claimsValue := r.Context().Value(UserKey)
+	if claimsValue == nil {
+		logger.Error("Programming error: UserKey not found in context, AuthMiddleware might be missing")
+		return nil, "", ""
+	}
+	claims, ok := claimsValue.(jwt.MapClaims)
+	if !ok {
+		logger.Error("Programming error: Value for UserKey in context is not jwt.MapClaims", slog.Any("value_type", fmt.Sprintf("%T", claimsValue)))
+		return nil, "", ""
+	}
+	roleVal, roleOk := claims["role"]
+	userIDVal, userOk := claims["user_id"]
+	if !roleOk || !userOk {
+		logger.Error("Claims map is missing 'role' or 'user_id'", slog.Any("claims", claims))
+		return claims, "", ""
+	}
+	roleStr, roleStrOk := roleVal.(string)
+	userIDStr, userIDStrOk := userIDVal.(string)
+	if !roleStrOk || !userIDStrOk {
+		logger.Error("Type assertion failed for 'role' or 'user_id' in claims", slog.Any("claims", claims))
+		return claims, "", ""
+	}
+	return claims, roleStr, userIDStr
 }
