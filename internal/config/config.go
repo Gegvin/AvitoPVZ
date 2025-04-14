@@ -7,34 +7,28 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Загружаем переменные окружения из файла .env, если он существует
+// Загружаем переменные окружения из файла .env, если он существует.
 func init() {
 	godotenv.Load()
 }
 
-// Config хранит конфигурационные переменные
-// для подключения к базе данных и JWT
-//
-// DBHost - адрес сервера базы данных
-// DBPort - порт
-// DBUser - пользователь
-// DBPassword - пароль
-// DBName - имя базы данных
-// JWTSecret - секрет для генерации JWT
-
+// Config хранит конфигурацию приложения.
+// Значения загружаются из переменных окружения или используются значения по умолчанию.
 type Config struct {
-	DBHost     string
-	DBPort     int
-	DBUser     string
-	DBPassword string
-	DBName     string
-	JWTSecret  string
+	DBHost     string // Адрес сервера БД
+	DBPort     int    // Порт сервера БД
+	DBUser     string // Пользователь БД
+	DBPassword string // Пароль БД
+	DBName     string // Имя базы данных
+	JWTSecret  string // Секрет для подписи JWT токенов
 }
 
-// LoadConfig загружает конфигурацию из переменных окружения
+// LoadConfig загружает конфигурацию из переменных окружения.
 func LoadConfig() (*Config, error) {
-	port, err := strconv.Atoi(getEnv("DB_PORT", "5432"))
+	portStr := getEnv("DB_PORT", "5432")
+	port, err := strconv.Atoi(portStr)
 	if err != nil {
+		// Используем порт по умолчанию при ошибке парсинга
 		port = 5432
 	}
 	config := &Config{
@@ -45,10 +39,10 @@ func LoadConfig() (*Config, error) {
 		DBName:     getEnv("DB_NAME", "pvz_db"),
 		JWTSecret:  getEnv("JWT_SECRET", "your_jwt_secret_key"),
 	}
-	return config, nil
+	return config, nil // Ошибка strconv.Atoi игнорируется, используется default
 }
 
-// getEnv возвращает значение переменной окружения, если она установлена, иначе fallback
+// getEnv получает значение переменной окружения или возвращает fallback.
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
