@@ -27,14 +27,13 @@ import (
 	pb "AvitoPVZ/proto"
 )
 
-// Определяем уникальный тип ключей для context, чтобы избежать конфликтов с ключами других пакетов.
+// Определяем уникальный тип ключей для context, чтобы избежать конфликтов
 type contextKey string
 
 // UserKey используется для хранения информации о пользователе в context.
-// Использование собственного типа гарантирует уникальность ключа.
+
 const UserKey contextKey = "user"
 
-// Handler теперь включает ProductTypeRepository
 type Handler struct {
 	db              *sql.DB
 	cfg             *config.Config
@@ -63,8 +62,7 @@ func NewHandler(db *sql.DB, cfg *config.Config, logger *slog.Logger) *Handler {
 	}
 }
 
-// respondJSON отправляет ответ в формате JSON.
-// Теперь использует api.Error для стандартных ошибок.
+// отправляет ответ в формате JSON.
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {
 	response, err := json.Marshal(payload)
 	if err != nil {
@@ -79,13 +77,13 @@ func respondJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Write(response)
 }
 
-// respondError - хелпер для отправки стандартизированных ошибок api.Error
+// respondError - хелпер для отправки стандартизированных ошибок
 func respondError(w http.ResponseWriter, logger *slog.Logger, status int, message string, err error) {
 	logLevel := slog.LevelError
 	if status < 500 && status >= 400 {
 		logLevel = slog.LevelWarn
 	}
-	// Log underlying error if present, otherwise log the message
+
 	errToLog := err
 	if errToLog == nil && status >= 500 { // Log message as error for 5xx if no underlying error
 		errToLog = errors.New(message)
@@ -95,7 +93,7 @@ func respondError(w http.ResponseWriter, logger *slog.Logger, status int, messag
 }
 
 // AuthMiddleware – HTTP middleware для проверки заголовка Authorization.
-// Использует api.Error для сообщений об ошибках.
+
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqLogger := h.logger.With(slog.String("middleware", "AuthMiddleware"))
@@ -129,7 +127,7 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 }
 
 // DummyLogin – выдаёт тестовый токен для указанной роли.
-// Использует api.TokenResponse для ответа.
+
 func (h *Handler) DummyLogin(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "DummyLogin"))
 	var req struct {
@@ -155,7 +153,7 @@ func (h *Handler) DummyLogin(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, api.TokenResponse{Token: &token})
 }
 
-// Register – ИСПОЛЬЗУЕТ DTO, без изменений.
+// Register – ИСПОЛЬЗУЕТ DTO
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "Register"))
 	var req api.RegisterRequest
@@ -180,7 +178,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		respondError(w, logger, http.StatusInternalServerError, "Password hashing error", err)
 		return
 	}
-	// Создаем внутреннюю модель
+	// Создаем модель
 	userID := uuid.New() // Генерируем UUID сразу
 	user := &models.User{
 		ID:       userID.String(), // Сохраняем как строку в модели
@@ -190,7 +188,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	err = h.userRepo.CreateUser(user)
 	if err != nil {
-		// Проверяем на ошибку дубликата email более надежно
+		// Проверяем на ошибку дубликата
 		if strings.Contains(err.Error(), "duplicate key value violates unique constraint") && strings.Contains(err.Error(), "users_email_key") {
 			respondError(w, logger, http.StatusConflict, "Email already exists", err)
 		} else {
@@ -200,21 +198,21 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("User registered successfully", slog.String("user_id", user.ID), slog.String("email", user.Email))
 
-	// Создаем DTO для ответа.
-	emailDto := types.Email(user.Email)        // Преобразуем string -> types.Email
-	roleDto := api.UserResponseRole(user.Role) // Преобразуем string -> api.UserResponseRole
-	idForDto := userID                         // Используем существующий uuid.UUID
+	// Создаем DTO для ответа
+	emailDto := types.Email(user.Email)
+	roleDto := api.UserResponseRole(user.Role)
+	idForDto := userID
 
 	responseUser := api.UserResponse{
-		Id:    &idForDto, // <<< Адрес от переменной типа uuid.UUID (должен быть совместим с *types.UUID)
-		Email: &emailDto, // <<< Адрес от переменной типа types.Email
-		Role:  &roleDto,  // <<< Адрес от переменной типа api.UserResponseRole
+		Id:    &idForDto,
+		Email: &emailDto,
+		Role:  &roleDto,
 	}
 
 	respondJSON(w, http.StatusCreated, responseUser)
 }
 
-// Login – ИСПОЛЬЗУЕТ DTO, без изменений.
+// Login – ИСПОЛЬЗУЕТ DTO
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "Login"))
 	var req api.LoginRequest
@@ -224,19 +222,19 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Преобразуем к string для использования внутри
-	emailStr := string(req.Email) // <<< Преобразуем DTO Email к string
+	emailStr := string(req.Email) //
 	logger.Debug("Login attempt", slog.String("email", emailStr))
 
-	// Используем внутреннюю модель
-	user, err := h.userRepo.GetUserByEmail(emailStr) // <<< Передаем string
+	// Используем модель
+	user, err := h.userRepo.GetUserByEmail(emailStr)
 	if err != nil {
 		errMsg := "User not found or invalid credentials"
 		if errors.Is(err, sql.ErrNoRows) {
-			// Логируем как Warn, так как это ожидаемое поведение для неверного ввода
+
 			logger.Warn(errMsg, slog.String("email", emailStr))
 			respondError(w, logger, http.StatusUnauthorized, errMsg, nil) // Не передаем sql.ErrNoRows клиенту
 		} else {
-			// Логируем как Error для неожиданных ошибок БД
+
 			respondError(w, logger, http.StatusInternalServerError, "Database error during login", err)
 		}
 		return
@@ -259,8 +257,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, api.TokenResponse{Token: &token})
 }
 
-// CreatePVZ – создание нового ПВЗ (только для модераторов).
-// Проверяет город по базе данных.
+// CreatePVZ – создание нового ПВЗ.
+
 func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "CreatePVZ"))
 	claims, role, userID := getUserClaimsFromContext(r, logger)
@@ -274,7 +272,7 @@ func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ожидаем JSON с полем "city", содержащим НАЗВАНИЕ города
+	// Ожидаем JSON с полем "city", содержащим название города
 	var req struct {
 		City string `json:"city"`
 	}
@@ -289,7 +287,7 @@ func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- Проверка и получение ID города из репозитория ---
+	// Проверка и получение ID города из репозитория
 	cityID, err := h.pvzRepo.GetCityIDByName(req.City)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -302,21 +300,20 @@ func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger.Debug("City validated", slog.String("city_name", req.City), slog.Int("city_id", cityID))
-	// --- Конец проверки города ---
 
 	// Создаем модель PVZ с CityID
 	pvzModel := models.PVZ{
 		ID:               uuid.New().String(),
 		RegistrationDate: time.Now(),
 		CityID:           cityID,
-		// CityName будет заполнено при чтении, но для ответа можем заполнить сразу
+
 		CityName: req.City,
 	}
 
 	// Создаем ПВЗ в репозитории
 	err = h.pvzRepo.CreatePVZ(&pvzModel)
 	if err != nil {
-		// TODO: Проверить на специфические ошибки БД (например, дубликат ID), если нужно
+
 		respondError(w, logger, http.StatusInternalServerError, "Failed to create PVZ", err)
 		return
 	}
@@ -324,15 +321,14 @@ func (h *Handler) CreatePVZ(w http.ResponseWriter, r *http.Request) {
 	metrics.IncPVZCreated()
 	logger.Info("PVZ created successfully", slog.String("pvz_id", pvzModel.ID), slog.String("city_name", pvzModel.CityName), slog.Int("city_id", pvzModel.CityID))
 
-	// Отправляем ответ. Модель pvzModel уже содержит CityName.
+	// Отправляем ответ
 	respondJSON(w, http.StatusCreated, pvzModel)
 }
 
-// GetPVZList – *** ОБНОВЛЕНО: проверка ролей, пагинация, фильтр по дате ***
 func (h *Handler) GetPVZList(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "GetPVZList"))
 
-	// --- 1. Проверка роли (employee или moderator) ---
+	// Проверка роли (employee или moderator)
 	claims, role, userID := getUserClaimsFromContext(r, logger)
 	if claims == nil {
 		respondError(w, logger, http.StatusInternalServerError, "Internal error: failed to get user claims", nil)
@@ -343,62 +339,13 @@ func (h *Handler) GetPVZList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger = logger.With(slog.String("user_id", userID), slog.String("role", role))
-	// --- Конец проверки роли ---
 
-	// --- 2. Парсинг параметров пагинации и фильтрации ---
+	//  Парсинг параметров пагинации и фильтрации
 	params := r.URL.Query() // Получаем все query параметры
 	logger.Info("Fetching PVZ list", slog.String("query", r.URL.RawQuery))
 
-	// // Делегируем парсинг параметров репозиторию, передавая url.Values
-	// // Альтернативно, можно парсить здесь:
-	// limitStr := params.Get("limit")
-	// offsetStr := params.Get("offset")
-	// dateStr := params.Get("receptionDate") // Ожидаемый формат YYYY-MM-DD
+	// Вызов репозитория с параметрами
 
-	// // Значения по умолчанию
-	// limit := 10 // Например, 10 элементов на страницу
-	// offset := 0
-	// var receptionDate *time.Time
-
-	// // Парсинг limit
-	// if limitStr != "" {
-	// 	l, err := strconv.Atoi(limitStr)
-	// 	if err != nil || l <= 0 {
-	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'limit' parameter", err)
-	// 		return
-	// 	}
-	// 	limit = l
-	// }
-
-	// // Парсинг offset
-	// if offsetStr != "" {
-	// 	o, err := strconv.Atoi(offsetStr)
-	// 	if err != nil || o < 0 {
-	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'offset' parameter", err)
-	// 		return
-	// 	}
-	// 	offset = o
-	// }
-
-	// // Парсинг даты
-	// if dateStr != "" {
-	// 	t, err := time.Parse("2006-01-02", dateStr) // Используем стандартный формат даты
-	// 	if err != nil {
-	// 		respondError(w, logger, http.StatusBadRequest, "Invalid 'receptionDate' parameter format (use YYYY-MM-DD)", err)
-	// 		return
-	// 	}
-	// 	receptionDate = &t
-	// }
-	// // Создаем структуру параметров для репозитория (если бы парсили здесь)
-	// repoParams := repository.GetPVZListParams{
-	// 	Limit:         limit,
-	// 	Offset:        offset,
-	// 	ReceptionDate: receptionDate,
-	// }
-	// --- Конец парсинга ---
-
-	// --- 3. Вызов репозитория с параметрами ---
-	// Передаем все параметры запроса в репозиторий, который сам их разберет
 	pvzs, err := h.pvzRepo.GetPVZList(params)
 	if err != nil {
 		// Обрабатываем возможные ошибки парсинга из репозитория как Bad Request
@@ -412,7 +359,6 @@ func (h *Handler) GetPVZList(w http.ResponseWriter, r *http.Request) {
 
 	logger.Info("PVZ list retrieved successfully", slog.Int("count", len(pvzs)))
 	// Отправляем список моделей
-	// TODO: Рассмотреть добавление метаданных пагинации (total count и т.д.)
 	respondJSON(w, http.StatusOK, pvzs)
 }
 
@@ -456,8 +402,8 @@ func (h *Handler) CreateReception(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, reception)
 }
 
-// AddProduct – добавление товара в текущую приёмку (только для сотрудников ПВЗ).
-// --- ОБНОВЛЕНА ЛОГИКА ВАЛИДАЦИИ ТИПА ---
+// добавление товара в текущую приёмку
+
 func (h *Handler) AddProduct(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With(slog.String("handler", "AddProduct"))
 	claims, role, userID := getUserClaimsFromContext(r, logger)
@@ -471,9 +417,7 @@ func (h *Handler) AddProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Структура запроса ожидает имя типа товара
 	var req struct {
-		// Type теперь означает имя типа, а не сам тип в БД
 		Type  string `json:"type"`
 		PVZID string `json:"pvzId"`
 	}
@@ -483,27 +427,25 @@ func (h *Handler) AddProduct(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debug("Request body decoded", slog.String("pvz_id", req.PVZID), slog.String("product_type_name", req.Type))
 
-	// --- Новая логика: Валидация типа товара через БД ---
 	if req.Type == "" {
 		respondError(w, logger, http.StatusBadRequest, "Product type name cannot be empty", nil)
 		return
 	}
-	typeID, err := h.productTypeRepo.GetProductTypeIDByName(req.Type) // <<< Используем новый репозиторий
+	typeID, err := h.productTypeRepo.GetProductTypeIDByName(req.Type)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			logger.Warn("Invalid product type received", slog.String("type_name", req.Type))
-			// Используем более общее сообщение об ошибке для пользователя
+
 			respondError(w, logger, http.StatusBadRequest, "Invalid or unsupported product type", nil)
 		} else {
-			// Логируем как ошибку сервера для других проблем с БД
+
 			respondError(w, logger, http.StatusInternalServerError, "Failed to validate product type", err)
 		}
 		return
 	}
 	logger.Debug("Product type validated", slog.String("type_name", req.Type), slog.Int("type_id", typeID))
-	// --- Конец новой логики ---
 
-	// Получаем открытую приемку (логика не изменилась)
+	// Получаем открытую приемку
 	reception, err := h.receptionRepo.GetOpenReception(req.PVZID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -520,23 +462,20 @@ func (h *Handler) AddProduct(w http.ResponseWriter, r *http.Request) {
 		ID:          uuid.New().String(),
 		DateTime:    time.Now(),
 		ReceptionID: reception.ID,
-		TypeID:      typeID, // <<< Используем найденный ID типа
+		TypeID:      typeID,
 	}
 
-	// Добавляем продукт в репозиторий (репозиторий ожидает TypeID)
+	// Добавляем продукт в репозиторий
 	err = h.productRepo.AddProduct(product)
 	if err != nil {
 		respondError(w, logger, http.StatusInternalServerError, "Failed to add product", err)
 		return
 	}
 	metrics.IncProductAdded()
-	// В лог можно добавить и имя типа для понятности
+
 	logger.Info("Product added successfully", slog.String("product_id", product.ID), slog.String("product_type_name", req.Type), slog.Int("type_id", product.TypeID))
 
-	// --- Ответ API ---
-	// Возвращаем созданный объект Product.
-	// Модель сейчас не содержит TypeName, заполняем его для ответа
-	product.TypeName = req.Type // <<< Заполняем имя типа для ответа
+	product.TypeName = req.Type
 	respondJSON(w, http.StatusCreated, product)
 }
 
@@ -614,7 +553,7 @@ func (h *Handler) CloseLastReception(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Проверяем кастомную ошибку репозитория
 		if err.Error() == "no reception updated" {
-			// Это странная ситуация, но обработаем как ошибку клиента
+
 			respondError(w, logger, http.StatusBadRequest, "Reception not found or already closed", nil)
 		} else {
 			respondError(w, logger, http.StatusInternalServerError, "Failed to close reception", err)
@@ -626,8 +565,8 @@ func (h *Handler) CloseLastReception(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, reception)
 }
 
-// --- Реализация gRPC-сервиса PVZService ---
-// Используем CityName из модели PVZ.
+// Реализация gRPC-сервиса
+
 type PVZService struct {
 	pvzRepo repository.PVZRepository // Используем тот же репозиторий
 	logger  *slog.Logger
@@ -643,12 +582,11 @@ func NewPVZService(repo repository.PVZRepository, logger *slog.Logger) *PVZServi
 
 func (s *PVZService) GetPVZList(ctx context.Context, req *pb.GetPVZListRequest) (*pb.GetPVZListResponse, error) {
 	s.logger.Info("Handling GetPVZList gRPC request")
-	// !!! ВАЖНО: gRPC метод GetAllPVZ пока не поддерживает фильтры/пагинацию !!!
-	// Используем GetAllPVZ, который внутри вызывает GetPVZList(nil)
+
 	pvzs, err := s.pvzRepo.GetAllPVZ()
 	if err != nil {
 		s.logger.Error("Failed to get all PVZ from repository for gRPC", slog.Any("error", err))
-		return nil, err // Возвращаем исходную ошибку для простоты
+		return nil, err
 	}
 
 	var protoPVZs []*pb.PVZ
@@ -656,14 +594,13 @@ func (s *PVZService) GetPVZList(ctx context.Context, req *pb.GetPVZListRequest) 
 		protoPVZs = append(protoPVZs, &pb.PVZ{
 			Id:               p.ID,
 			RegistrationDate: timestamppb.New(p.RegistrationDate),
-			City:             p.CityName, // Используем CityName из модели
+			City:             p.CityName,
 		})
 	}
 	s.logger.Info("Successfully retrieved PVZ list via gRPC", slog.Int("count", len(protoPVZs)))
 	return &pb.GetPVZListResponse{Pvzs: protoPVZs}, nil
 }
 
-// Вспомогательная функция для извлечения claims из контекста (без изменений)
 func getUserClaimsFromContext(r *http.Request, logger *slog.Logger) (claims jwt.MapClaims, role string, userID string) {
 	claimsValue := r.Context().Value(UserKey)
 	if claimsValue == nil {

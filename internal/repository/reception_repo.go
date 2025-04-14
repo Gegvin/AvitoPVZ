@@ -7,7 +7,7 @@ import (
 	"AvitoPVZ/internal/models"
 )
 
-// ReceptionRepository определяет интерфейс для работы с данными приемок.
+// ReceptionRepository определяет интерфейс для работы с данными приемок
 type ReceptionRepository interface {
 	OpenReceptionExists(pvzId string) (bool, error)
 	CreateReception(reception *models.Reception) error
@@ -19,12 +19,11 @@ type receptionRepo struct {
 	db *sql.DB
 }
 
-// NewReceptionRepository создает новый экземпляр ReceptionRepository.
 func NewReceptionRepository(db *sql.DB) ReceptionRepository {
 	return &receptionRepo{db: db}
 }
 
-// OpenReceptionExists проверяет, существует ли открытая приемка для данного ПВЗ.
+// OpenReceptionExists проверяет, существует ли открытая приемка для данного ПВЗ
 func (r *receptionRepo) OpenReceptionExists(pvzId string) (bool, error) {
 	query := `SELECT id FROM receptions WHERE pvz_id=$1 AND status='in_progress'`
 	row := r.db.QueryRow(query, pvzId)
@@ -39,15 +38,15 @@ func (r *receptionRepo) OpenReceptionExists(pvzId string) (bool, error) {
 	return true, nil // Найдено
 }
 
-// CreateReception создает новую запись о приемке в БД.
+// CreateReception создает новую запись о приемке в БД
 func (r *receptionRepo) CreateReception(reception *models.Reception) error {
 	query := `INSERT INTO receptions (id, date_time, pvz_id, status) VALUES ($1, $2, $3, $4)`
 	_, err := r.db.Exec(query, reception.ID, reception.DateTime, reception.PVZID, reception.Status)
 	return err
 }
 
-// GetOpenReception возвращает последнюю открытую приемку для ПВЗ.
-// Возвращает sql.ErrNoRows, если открытых приемок нет.
+// GetOpenReception возвращает последнюю открытую приемку для ПВЗ
+
 func (r *receptionRepo) GetOpenReception(pvzId string) (*models.Reception, error) {
 	query := `SELECT id, date_time, pvz_id, status FROM receptions WHERE pvz_id=$1 AND status='in_progress' ORDER BY date_time DESC LIMIT 1`
 	row := r.db.QueryRow(query, pvzId)
@@ -59,8 +58,8 @@ func (r *receptionRepo) GetOpenReception(pvzId string) (*models.Reception, error
 	return reception, nil
 }
 
-// CloseReception закрывает приемку по ее ID, изменяя статус на 'close'.
-// Возвращает кастомную ошибку "no reception updated", если ни одна строка не была обновлена.
+// CloseReception закрывает приемку по ее ID, изменяя статус на 'close'
+
 func (r *receptionRepo) CloseReception(receptionId string) error {
 	query := `UPDATE receptions SET status='close' WHERE id=$1`
 	res, err := r.db.Exec(query, receptionId)

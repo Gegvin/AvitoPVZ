@@ -25,7 +25,6 @@ type pvzRepo struct {
 	db *sql.DB
 }
 
-// NewPVZRepository создает новый экземпляр PVZRepository.
 func NewPVZRepository(db *sql.DB) PVZRepository {
 	return &pvzRepo{db: db}
 }
@@ -74,18 +73,17 @@ func (r *pvzRepo) CreatePVZ(pvz *models.PVZ) error {
 	return err
 }
 
-// GetPVZList получает список ПВЗ с учетом пагинации и фильтрации по дате приемки.
 // Парсит параметры 'limit', 'offset', 'receptionDate' из url.Values.
 func (r *pvzRepo) GetPVZList(params url.Values) ([]models.PVZ, error) {
 	// Парсинг параметров
 	limitStr := params.Get("limit")
 	offsetStr := params.Get("offset")
-	dateStr := params.Get("receptionDate") // Формат YYYY-MM-DD
+	dateStr := params.Get("receptionDate")
 
 	// Значения по умолчанию
 	limit := 10
 	offset := 0
-	var receptionDate *time.Time // nil, если параметр не передан
+	var receptionDate *time.Time
 
 	if limitStr != "" {
 		l, err := strconv.Atoi(limitStr)
@@ -110,7 +108,7 @@ func (r *pvzRepo) GetPVZList(params url.Values) ([]models.PVZ, error) {
 		receptionDate = &t
 	}
 
-	// Построение SQL запроса
+	// SQL запрос
 	baseQuery := `SELECT DISTINCT p.id, p.registration_date, p.city_id, c.name
                   FROM pvz p
                   JOIN allowed_cities c ON p.city_id = c.id`
@@ -118,9 +116,8 @@ func (r *pvzRepo) GetPVZList(params url.Values) ([]models.PVZ, error) {
 	var whereClauses []string
 	placeholderCount := 1
 
-	// Фильтр по дате приемки (если указана)
 	if receptionDate != nil {
-		// Добавляем JOIN с receptions только если фильтруем по дате
+
 		baseQuery += ` JOIN receptions r ON p.id = r.pvz_id`
 		whereClauses = append(whereClauses, fmt.Sprintf("DATE(r.date_time) = $%d", placeholderCount))
 		args = append(args, receptionDate.Format("2006-01-02"))
@@ -166,7 +163,7 @@ func (r *pvzRepo) GetPVZList(params url.Values) ([]models.PVZ, error) {
 	return pvzs, nil
 }
 
-// GetAllPVZ возвращает все ПВЗ без пагинации/фильтрации (используя GetPVZList с defaults).
+// GetAllPVZ возвращает все ПВЗ без пагинации/фильтрации
 func (r *pvzRepo) GetAllPVZ() ([]models.PVZ, error) {
 	return r.GetPVZList(nil) // Передаем nil для использования значений по умолчанию
 }

@@ -72,7 +72,7 @@ func setupLogger() *slog.Logger {
 
 	opts := &slog.HandlerOptions{
 		Level:     logLevel,
-		AddSource: logLevel <= slog.LevelDebug, // Добавлять источник для Debug
+		AddSource: logLevel <= slog.LevelDebug,
 	}
 
 	if logFormat == "json" {
@@ -84,7 +84,7 @@ func setupLogger() *slog.Logger {
 	}
 
 	logger := slog.New(handler)
-	slog.SetDefault(logger) // Устанавливаем как логгер по умолчанию
+	slog.SetDefault(logger) //  логгер по умолчанию
 	return logger
 }
 
@@ -111,10 +111,10 @@ func main() {
 
 	h := handlers.NewHandler(database, cfg, logger)
 
-	// --- Основной роутер API (порт 8080) ---
+	//  Основной роутер API (порт 8080)
 	r := mux.NewRouter()
 
-	// Middleware для логирования HTTP запросов
+	// Middleware для логирования запросов
 	loggingMiddleware := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -138,7 +138,7 @@ func main() {
 	r.HandleFunc("/register", h.Register).Methods("POST")
 	r.HandleFunc("/login", h.Login).Methods("POST")
 
-	// Защищённые эндпоинты (требуется аутентификация)
+	// Защищённые эндпоинты
 	api := r.PathPrefix("/").Subrouter()
 	api.Use(h.AuthMiddleware)
 
@@ -149,7 +149,7 @@ func main() {
 	api.HandleFunc("/receptions", h.CreateReception).Methods("POST")
 	api.HandleFunc("/products", h.AddProduct).Methods("POST")
 
-	// --- Отдельный сервер для метрик Prometheus (порт 9000) ---
+	//  Отдельный сервер для метрик Prometheus (порт 9000)
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
 
@@ -169,7 +169,7 @@ func main() {
 		}
 	}()
 
-	// --- Запуск основного HTTP-сервера API (порт 8080) ---
+	//  Запуск основного HTTP-сервера API (порт 8080)
 	apiSrv := &http.Server{
 		Handler:      r,
 		Addr:         ":8080",
@@ -184,11 +184,11 @@ func main() {
 		logger.Info("HTTP API server starting", slog.String("address", apiSrv.Addr))
 		if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP API server ListenAndServe error", slog.Any("error", err))
-			os.Exit(1) // Ошибка основного сервера фатальна
+			os.Exit(1) // Ошибка основного сервера
 		}
 	}()
 
-	// --- Запуск gRPC-сервера (порт 3000) ---
+	//  Запуск gRPC-сервера (порт 3000)
 	grpcAddr := ":3000"
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
@@ -210,7 +210,7 @@ func main() {
 		}
 	}()
 
-	// --- Грейсфул-шатдаун ---
+	// шатдаун
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	sig := <-stop
@@ -243,5 +243,4 @@ func main() {
 	logger.Info("Application shut down complete.")
 }
 
-// Для ссылки на пакет io, если понадобится io.Discard
 var _ io.Writer = io.Discard

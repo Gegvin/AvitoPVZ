@@ -1,53 +1,52 @@
 import http from 'k6/http';
 import { check, sleep, fail } from 'k6';
-import { Rate } from 'k6/metrics'; // Импортируем Rate для RPS метрики
+import { Rate } from 'k6/metrics';
 
-// --- Конфигурация теста ---
-const BASE_URL = 'http://localhost:8080'; // Адрес API
+
+const BASE_URL = 'http://localhost:8080';
 const PRODUCT_TYPES = ['электроника', 'одежда', 'обувь'];
-// PVZ_ID получаем из переменной окружения в setup
 
-// Создаем кастомную метрику для отслеживания реального RPS
+
+
 const RPS_COUNTER = new Rate('http_reqs_rate');
 
 export const options = {
-    // Используем executor для контроля частоты запросов
+
     executor: 'ramping-arrival-rate',
 
-    // Определяем единицу времени для rate
+
     timeUnit: '1s',
 
-    // Начальное количество VUs, k6 будет создавать больше при необходимости
-    preAllocatedVUs: 50,
-    // Максимальное количество VUs, которое k6 может создать
-    maxVUs: 500, // Можно увеличить, если k6 будет жаловаться, что не хватает VUs
 
-    // Этапы нагрузки: пытаемся достичь ~500 итераций/сек
-    // Каждая итерация делает 2 запроса, цель ~1000 запросов/сек (RPS)
+    preAllocatedVUs: 50,
+
+    maxVUs: 500,
+
+
     stages: [
-        { duration: '30s', target: 200 },  // Разгон до 200 итераций/сек ( ~400 RPS) за 30 сек
-        { duration: '1m', target: 200 },  // Держим 200 итераций/сек 1 минуту
-        { duration: '30s', target: 500 },  // Разгон до 500 итераций/сек (~1000 RPS) за 30 сек
-        { duration: '1m', target: 500 },  // Держим 500 итераций/сек 1 минуту
-        { duration: '30s', target: 0 },    // Снижение до 0 за 30 сек
+        { duration: '30s', target: 200 },
+        { duration: '1m', target: 200 },
+        { duration: '30s', target: 500 },
+        { duration: '1m', target: 500 },
+        { duration: '30s', target: 0 },
     ],
 
     thresholds: {
         // NFR цели:
-        'http_req_duration': ['p(95)<100'], // SLI времени ответа p95 < 100ms
-        'http_req_failed': ['rate<0.0001'], // SLI успешности 99.99% (ошибок < 0.01%)
-        'checks': ['rate>0.99'], // Большинство проверок должно проходить
-        // Порог для реального RPS (опционально, т.к. может не достигаться)
-        // 'http_reqs_rate': ['rate>=1000'], // Проверка, что достигли 1000 RPS
+        'http_req_duration': ['p(95)<100'],
+        'http_req_failed': ['rate<0.0001'],
+        'checks': ['rate>0.99'],
+
+
     },
 };
 
-// --- Функция Setup: выполняется 1 раз перед тестом ---
+
 export function setup() {
     console.log('=== Running Setup ===');
     console.log('Fetching authentication tokens...');
 
-    // Обертка для получения токена
+
     function getAuthToken(role) {
         const payload = JSON.stringify({ role: role });
         const params = { headers: { 'Content-Type': 'application/json' } };
@@ -84,12 +83,12 @@ export function setup() {
 }
 
 
-// --- Основная логика теста (выполняется каждым VU) ---
-// Принимает данные из setup() как аргумент 'data'
+
+
 export default function (data) {
 
     if (!data || !data.moderatorToken || !data.employeeToken) {
-        // Это не должно происходить, если setup отработал, но на всякий случай
+
         return;
     }
 
@@ -97,7 +96,7 @@ export default function (data) {
     const empToken = data.employeeToken;
     const pvzId = data.pvzId;
 
-    // --- Сценарий 1: Получение списка ПВЗ (модератор) ---
+
     const pvzParams = {
         headers: { 'Authorization': `Bearer ${modToken}` },
         tags: { name: 'GetPVZList' },
@@ -106,13 +105,12 @@ export default function (data) {
     check(pvzRes, {
         '[GET /pvz] Status is 200': (r) => r.status === 200,
     }, { name: 'GetPVZList' });
-    RPS_COUNTER.add(1); // Учитываем запрос в кастомном счетчике RPS
+    RPS_COUNTER.add(1);
 
-    // Убрали sleep для максимальной частоты запросов
-    // sleep(0.5);
 
-    // --- Сценарий 2: Добавление товара (сотрудник) ---
-    if (pvzId) { // Выполняем, только если PVZ_ID был передан
+
+
+    if (pvzId) {
         const randomProductType = PRODUCT_TYPES[Math.floor(Math.random() * PRODUCT_TYPES.length)];
         const productPayload = JSON.stringify({
             type: randomProductType,
@@ -129,14 +127,13 @@ export default function (data) {
         const productCheck = check(productRes, {
             '[POST /products] Status is 201 (Created)': (r) => r.status === 201,
         }, { name: 'AddProduct' });
-        RPS_COUNTER.add(1); // Учитываем запрос в кастомном счетчике RPS
+        RPS_COUNTER.add(1);
 
-        // Логируем ошибку, если проверка не прошла и статус не 201
+
         if (!productCheck && productRes.status !== 201) {
-            // Логируем только статус и VU ID, чтобы не перегружать вывод при высокой нагрузке
+
             console.log(`[VU: ${__VU}] POST /products failed. Status: ${productRes.status}`);
         }
     }
-    // Убрали sleep для максимальной частоты запросов
-    // sleep(1);
+
 }

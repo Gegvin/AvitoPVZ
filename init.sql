@@ -1,4 +1,4 @@
--- Drop existing tables if they exist (for clean slate during development/testing)
+
 DROP TABLE IF EXISTS products;
 DROP TABLE IF EXISTS receptions;
 DROP TABLE IF EXISTS pvz;

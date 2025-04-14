@@ -6,7 +6,7 @@ import (
 	"AvitoPVZ/internal/models"
 )
 
-// UserRepository определяет интерфейс для работы с данными пользователей.
+// UserRepository определяет интерфейс для работы
 type UserRepository interface {
 	CreateUser(user *models.User) error
 	GetUserByEmail(email string) (*models.User, error)
@@ -16,7 +16,6 @@ type userRepo struct {
 	db *sql.DB
 }
 
-// NewUserRepository создает новый экземпляр UserRepository.
 func NewUserRepository(db *sql.DB) UserRepository {
 	return &userRepo{db: db}
 }
@@ -29,7 +28,7 @@ func (r *userRepo) CreateUser(user *models.User) error {
 }
 
 // GetUserByEmail находит пользователя по его email.
-// Возвращает sql.ErrNoRows, если пользователь не найден.
+
 func (r *userRepo) GetUserByEmail(email string) (*models.User, error) {
 	query := `SELECT id, email, password, role FROM users WHERE email=$1`
 	row := r.db.QueryRow(query, email)
