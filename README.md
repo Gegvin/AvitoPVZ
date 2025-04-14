@@ -277,9 +277,6 @@
     ```bash
     # Сначала получите токен модератора и сотрудника
     # Затем создайте ПВЗ через API модератором и получите его ID
-    export MOD_TOKEN="токен_модератора"
-    export EMP_TOKEN="токен_сотрудника"
-    export PVZ_ID="id_созданного_пвз"
 
     k6 run --env MODERATOR_TOKEN=$MOD_TOKEN --env EMPLOYEE_TOKEN=$EMP_TOKEN --env PVZ_ID=$PVZ_ID loadtest.js
     ```
